@@ -669,8 +669,8 @@ cache_handle fs_cache::initiate_prefetching_request(const io_object& obj,
 
   auto chunks_to_fetch = file.update_and_get_chunks(chunk_offsets, desired);
   std::erase(chunks_to_fetch, nullptr);  // offsets past EOF have no slot
-  for (auto* c : chunks_to_fetch) {      // raise (never lower) the eviction priority of every chunk
-                                         // this request names
+  // Raise (never lower) the eviction priority of every chunk this request names.
+  for (auto* c : chunks_to_fetch) {
     auto cur = c->priority.load(std::memory_order_relaxed);
     while (cur < priority &&
            !c->priority.compare_exchange_weak(cur, priority, std::memory_order_relaxed)) {}

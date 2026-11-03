@@ -576,7 +576,7 @@ std::size_t fs_cache::retired_generation_count() const noexcept
 cache_handle fs_cache::initiate_prefetching_request(const io_object& obj,
                                                     std::span<const byte_range> ranges,
                                                     std::optional<int> gpu_id,
-                                                    std::uint8_t priority)
+                                                    std::uint8_t eviction_priority)
 {
   if (!_armed) { return cache_handle(); }
 
@@ -671,9 +671,9 @@ cache_handle fs_cache::initiate_prefetching_request(const io_object& obj,
   std::erase(chunks_to_fetch, nullptr);  // offsets past EOF have no slot
   // Raise (never lower) the eviction priority of every chunk this request names.
   for (auto* c : chunks_to_fetch) {
-    auto cur = c->priority.load(std::memory_order_relaxed);
-    while (cur < priority &&
-           !c->priority.compare_exchange_weak(cur, priority, std::memory_order_relaxed)) {}
+    auto cur = c->eviction_priority.load(std::memory_order_relaxed);
+    while (cur < eviction_priority && !c->eviction_priority.compare_exchange_weak(
+                                        cur, eviction_priority, std::memory_order_relaxed)) {}
   }
   req.chunks = std::make_shared<const std::vector<cached_chunk*>>(std::move(chunks_to_fetch));
   // Resolve the preferred NUMA node for staging buffers from the target GPU's
@@ -1641,7 +1641,7 @@ void fs_cache::evict_loop(const std::stop_token& st)
     for (auto& er : eviction_batch) {
       if (!er.released || !er.req || !er.req.chunks) { continue; }
       for (cached_chunk* c : *er.req.chunks) {
-        levels.set(c->priority.load(std::memory_order_relaxed));
+        levels.set(c->eviction_priority.load(std::memory_order_relaxed));
       }
     }
     for (int pass = 0; pass < n_passes && reclaimed < need; ++pass) {
@@ -1652,7 +1652,7 @@ void fs_cache::evict_loop(const std::stop_token& st)
           if (!er.released || !er.req || !er.req.chunks) { continue; }
           for (cached_chunk* c : *er.req.chunks) {
             if (reclaimed >= need) { break; }
-            if (c->priority.load(std::memory_order_relaxed) != level) { continue; }
+            if (c->eviction_priority.load(std::memory_order_relaxed) != level) { continue; }
             // A single relaxed load answers the whole question: does this chunk
             // hold a reclaimable buffer, and is anybody still subscribed to it?
             auto const snap = c->state.load();
@@ -1662,7 +1662,7 @@ void fs_cache::evict_loop(const std::stop_token& st)
             reclaim_by_numa[c->numa_node].push_back(reinterpret_cast<std::byte*>(c->data));
             c->data     = nullptr;
             std::ignore = c->state.mark_empty();  // also clears the populated extent
-            c->priority.store(0, std::memory_order_relaxed);
+            c->eviction_priority.store(0, std::memory_order_relaxed);
             ++reclaimed;
             _counters.evictions.fetch_add(1, std::memory_order_relaxed);
           }

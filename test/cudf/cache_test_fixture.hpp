@@ -77,11 +77,11 @@ inline void advise(io::datasource& ds, std::size_t size)
 inline void advise_range(io::datasource& source,
                          std::size_t offset,
                          std::size_t size,
-                         std::uint8_t priority = 0)
+                         std::uint8_t eviction_priority = 0)
 {
   std::array<cudf::io::text::byte_range_info, 1> ranges{cudf::io::text::byte_range_info{
     static_cast<std::int64_t>(offset), static_cast<std::int64_t>(size)}};
-  source.fadvise(ranges, 0, priority);
+  source.fadvise(ranges, 0, eviction_priority);
 }
 
 template <typename Predicate>

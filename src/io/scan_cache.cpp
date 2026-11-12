@@ -154,6 +154,13 @@ void scan_cache::register_layout(std::string const& path,
 
 std::vector<column_stats> scan_cache::stats() const { return _admission->stats(); }
 
+std::size_t scan_cache::clear()
+{
+  _objects->clear();
+  auto* cache = _context->cache();
+  return cache == nullptr ? 0 : cache->reclaim(cache::reclaim_mode::forced);
+}
+
 std::string scan_cache::summary() const
 {
   auto const* cache = _context->cache();

@@ -64,6 +64,13 @@ class object_cache {
   }
 
   /// Number of handles kept.
+  /// Forget every handle: the next open of each path makes its request again.
+  void clear()
+  {
+    std::lock_guard lock(_mutex);
+    _objects.clear();
+  }
+
   [[nodiscard]] std::size_t size() const
   {
     std::lock_guard lock(_mutex);

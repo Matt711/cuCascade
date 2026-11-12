@@ -18,6 +18,9 @@
 
 #include <cucascade/io/rest/curl_handle.hpp>
 
+#include <openssl/ssl.h>
+
+#include <cstdlib>
 #include <stdexcept>
 
 namespace cucascade::io::rest {
@@ -30,6 +33,27 @@ constexpr long kRecvBufferSize     = 128L * 1024L;
 constexpr long kConnectTimeoutMs   = 5'000L;
 constexpr long kTransferTimeoutMs  = 30'000L;
 constexpr long kDnsCacheTimeoutSec = 600L;
+
+// TLS read-ahead (experimental, CUCASCADE_TLS_READ_AHEAD=<bytes>): OpenSSL otherwise reads the
+// socket one record at a time (a 5-byte header, then up to 16 KiB of body), two recv calls per
+// record; with read-ahead one recv fills a buffer of this many bytes with as many records as are
+// queued.
+long tls_read_ahead_bytes()
+{
+  static long const bytes = [] {
+    auto const* v = std::getenv("CUCASCADE_TLS_READ_AHEAD");
+    return v == nullptr ? 0L : std::strtol(v, nullptr, 10);
+  }();
+  return bytes;
+}
+
+CURLcode configure_ssl_ctx(CURL*, void* ssl_ctx, void*)
+{
+  auto* ctx = static_cast<SSL_CTX*>(ssl_ctx);
+  SSL_CTX_set_read_ahead(ctx, 1);
+  SSL_CTX_set_default_read_buffer_len(ctx, static_cast<std::size_t>(tls_read_ahead_bytes()));
+  return CURLE_OK;
+}
 
 // curl_global_init must run exactly once per process, before any handle is
 // created.  curl_global_cleanup is intentionally never paired with it (see the
@@ -131,6 +155,9 @@ void configure_easy_handle(CURL* handle,
   // bytes.  Region selection belongs at the authorizer/endpoint level.
   CUCASCADE_CURL_CHECK(curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L));
   CUCASCADE_CURL_CHECK(curl_easy_setopt(handle, CURLOPT_BUFFERSIZE, kRecvBufferSize));
+  if (tls_read_ahead_bytes() > 0) {
+    CUCASCADE_CURL_CHECK(curl_easy_setopt(handle, CURLOPT_SSL_CTX_FUNCTION, &configure_ssl_ctx));
+  }
 
   // Default timeouts; the reactor may override the whole-transfer timeout per
   // request based on its configuration.

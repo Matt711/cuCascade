@@ -409,7 +409,7 @@ if(CUCASCADE_BUILD_IO)
   # side by cuCascadeConfig.cmake (same names), mirroring the Numa::Numa
   # approach.
   set(CUCASCADE_IO_LINK_LIBS PkgConfig::LIBURING PkgConfig::CURL
-                             OpenSSL::Crypto)
+                             OpenSSL::Crypto OpenSSL::SSL)
   if(CUCASCADE_BUILD_CUDF)
     list(APPEND CUCASCADE_IO_LINK_LIBS kvikio::kvikio)
   endif()

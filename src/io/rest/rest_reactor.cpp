@@ -40,6 +40,8 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <emmintrin.h>
 #include <cstring>
 #include <deque>
 #include <format>
@@ -66,6 +68,30 @@ namespace {
 /// aborts the transfer with CURLE_WRITE_ERROR.  Overflow past capacity is
 /// counted (total_received) but not stored, so a server that ignored the Range
 /// header can be detected after the fact.
+// Copy with non-temporal stores (experimental, CUCASCADE_SINK_STREAM=1): the destination is cold
+// pinned memory read next by a device copy, so caching it only costs a read of every line from
+// memory and evicts the hot network buffers.
+void stream_copy(uint8_t* dst, uint8_t const* src, size_t n)
+{
+  size_t const head = std::min(n, (16 - reinterpret_cast<uintptr_t>(dst) % 16) % 16);
+  std::memcpy(dst, src, head);
+  dst += head;
+  src += head;
+  n -= head;
+  for (; n >= 64; n -= 64, dst += 64, src += 64) {
+    auto const a = _mm_loadu_si128(reinterpret_cast<__m128i const*>(src));
+    auto const b = _mm_loadu_si128(reinterpret_cast<__m128i const*>(src + 16));
+    auto const c = _mm_loadu_si128(reinterpret_cast<__m128i const*>(src + 32));
+    auto const d = _mm_loadu_si128(reinterpret_cast<__m128i const*>(src + 48));
+    _mm_stream_si128(reinterpret_cast<__m128i*>(dst), a);
+    _mm_stream_si128(reinterpret_cast<__m128i*>(dst + 16), b);
+    _mm_stream_si128(reinterpret_cast<__m128i*>(dst + 32), c);
+    _mm_stream_si128(reinterpret_cast<__m128i*>(dst + 48), d);
+  }
+  std::memcpy(dst, src, n);
+  _mm_sfence();
+}
+
 size_t write_to_sink(char* ptr, size_t size, size_t nmemb, void* userdata)
 {
   auto* sink         = static_cast<buf_sink*>(userdata);
@@ -94,8 +120,15 @@ size_t write_to_sink(char* ptr, size_t size, size_t nmemb, void* userdata)
       continue;
     }
     size_t const n = std::min(b.iov_len - sink->cursor, remaining);
-    if (b.iov_base != nullptr) {
-      std::memcpy(static_cast<uint8_t*>(b.iov_base) + sink->cursor, src, n);
+    // CUCASCADE_SKIP_SINK_COPY=1: measurement only (bytes are not stored).
+    static bool const skip_copy   = std::getenv("CUCASCADE_SKIP_SINK_COPY") != nullptr;
+    static bool const stream_sink = std::getenv("CUCASCADE_SINK_STREAM") != nullptr;
+    if (b.iov_base != nullptr && !skip_copy) {
+      if (stream_sink) {
+        stream_copy(static_cast<uint8_t*>(b.iov_base) + sink->cursor, src, n);
+      } else {
+        std::memcpy(static_cast<uint8_t*>(b.iov_base) + sink->cursor, src, n);
+      }
     }
     sink->cursor += n;
     sink->written += n;

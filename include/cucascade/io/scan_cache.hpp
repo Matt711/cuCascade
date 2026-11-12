@@ -133,6 +133,16 @@ class scan_cache {
   /// Counters of the prefetching cache (reads, hits, misses, evictions) as text.
   [[nodiscard]] std::string summary() const;
 
+  /**
+   * @brief Empty the cache: return every cached chunk to the pool and forget every opened object,
+   * so the next reads, footers included, go to the object store (a cold query).
+   *
+   * Call between queries: chunks a reader still pins are not taken.
+   *
+   * @return Bytes returned to the pool.
+   */
+  std::size_t clear();
+
  private:
   std::unique_ptr<cucascade::memory::memory_reservation_manager> _memory;
   std::unique_ptr<io_context_registry> _registry;

@@ -28,10 +28,46 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <span>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace cucascade::io::cache {
+
+namespace {
+// Debugging (CUCASCADE_POOL_CHECK): every chunk buffer handed out and not yet returned, to catch a
+// buffer returned twice or handed to two chunks at once.
+bool const pool_check = std::getenv("CUCASCADE_POOL_CHECK") != nullptr;
+std::mutex pool_check_mtx;
+std::unordered_set<std::byte*> pool_outstanding;
+
+void check_out(std::vector<std::byte*> const& blocks)
+{
+  if (!pool_check) { return; }
+  std::lock_guard lk(pool_check_mtx);
+  for (auto* b : blocks) {
+    if (!pool_outstanding.insert(b).second) {
+      std::fprintf(stderr, "CUCASCADE_POOL_CHECK: buffer %p handed out while already out\n",
+                   static_cast<void*>(b));
+    }
+  }
+}
+
+void check_in(std::span<std::byte* const> blocks)
+{
+  if (!pool_check) { return; }
+  std::lock_guard lk(pool_check_mtx);
+  for (auto* b : blocks) {
+    if (pool_outstanding.erase(b) == 0) {
+      std::fprintf(stderr, "CUCASCADE_POOL_CHECK: buffer %p returned while not out\n",
+                   static_cast<void*>(b));
+    }
+  }
+}
+}  // namespace
 
 buffer_pool::buffer_pool(cucascade::memory::memory_reservation_manager& reservation_manager,
                          double reservation_fraction_for_prefetching,
@@ -86,6 +122,7 @@ std::vector<std::byte*> buffer_pool::allocate_bulk_from(size_t n, int numa_node)
     auto blocks = arena.mr->allocate_multiple_blocks(n * _chunk_bytes, arena.reservation.get());
     if (!blocks) return {};
     auto out = blocks->release_blocks();
+    check_out(out);
     _arena_chunks[it->second].fetch_add(out.size(), std::memory_order_relaxed);
     _n_allocated_chunks.fetch_add(out.size(), std::memory_order_relaxed);
     return out;
@@ -114,6 +151,7 @@ std::vector<std::byte*> buffer_pool::allocate_bulk(size_t n, int& numa_node)
       if (!blocks) continue;
       numa_node = arena.numa_id;
       auto out  = blocks->release_blocks();
+      check_out(out);
       _arena_chunks[index].fetch_add(out.size(), std::memory_order_relaxed);
       _n_allocated_chunks.fetch_add(out.size(), std::memory_order_relaxed);
       return out;
@@ -139,6 +177,7 @@ void buffer_pool::deallocate_bulk(std::span<std::byte* const> blocks, int numa) 
   if (it == _numa_to_arena_index.end()) return;  // release builds drop the blocks (see header)
   auto const index = it->second;
   auto& arena      = _host_arenas[index];
+  check_in(blocks);
   // Back to the MR they came from, settled against this arena's reservation
   // (origin-safe).  Nothing on this path allocates.
   arena.mr->return_blocks(blocks, arena.reservation.get());

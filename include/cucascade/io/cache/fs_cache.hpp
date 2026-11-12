@@ -413,6 +413,37 @@ class fs_cache {
     std::span<const byte_range> ranges,
     exec::invocable<void(prefetch_result) noexcept> on_done);
 
+  /// Cache-resident bytes of some ranges, pinned against eviction until destroyed: for a caller
+  /// that copies them itself and knows when the copies are done.
+  class resident_ranges {
+   public:
+    struct piece {
+      std::uint8_t const* src;  ///< the bytes in a cached chunk
+      std::uint8_t* dst;        ///< where the slice wants them
+      std::size_t size;
+    };
+
+    resident_ranges() = default;
+    ~resident_ranges();
+    resident_ranges(resident_ranges const&)            = delete;
+    resident_ranges& operator=(resident_ranges const&) = delete;
+
+    [[nodiscard]] std::span<piece const> pieces() const noexcept { return _pieces; }
+
+   private:
+    friend class fs_cache;
+    std::vector<piece> _pieces;
+    std::vector<cached_chunk*> _pins;
+    std::shared_ptr<cache_generation> _generation;
+  };
+
+  /// Pin every chunk holding the bytes of @p slices of @p obj and describe where they are. Null,
+  /// with nothing pinned, unless every byte is resident. Unlike @ref device_read_ranges_async it
+  /// issues no copy and waits for nothing: the caller copies the pieces and drops the result once
+  /// its copies have completed.
+  [[nodiscard]] std::unique_ptr<resident_ranges> pin_resident_ranges(
+    const io_object& obj, std::span<const slice> slices, cache_handle* handle = nullptr) const;
+
   /// Test-only hook run inside @ref prefetch after the producer is published
   /// as loading and before any chunk is claimed, with no cache lock held.
   /// Configure only while no prefetch can run.

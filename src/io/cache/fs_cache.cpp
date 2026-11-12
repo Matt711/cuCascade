@@ -1381,6 +1381,46 @@ exec::semi_future<std::size_t> fs_cache::device_read_ranges_async(
   return exec::make_semi_future<std::size_t>(logical_bytes);
 }
 
+fs_cache::resident_ranges::~resident_ranges()
+{
+  for (auto* chunk : _pins) {
+    chunk->state.release_read();
+  }
+}
+
+std::unique_ptr<fs_cache::resident_ranges> fs_cache::pin_resident_ranges(
+  const io_object& obj, std::span<const slice> slices, cache_handle* handle) const
+{
+  auto result         = std::make_unique<resident_ranges>();
+  result->_generation = generation_for(obj, handle);
+  if (!result->_generation) { return nullptr; }
+  for (auto const& raw : slices) {
+    if (raw.size() == 0) { continue; }
+    if (raw.offset() + raw.size() > obj.size()) { return nullptr; }  // the destructor unpins
+    range const request{raw.offset(), raw.size()};
+    auto chunks = ranges_in_cache(
+      result->_generation.get(), request.offset, request.size, coverage_policy::partial, handle);
+    std::size_t ci   = 0;
+    auto const first = (request.offset / _chunk_size) * _chunk_size;
+    for (auto off = first; off < request.end(); off += _chunk_size) {
+      while (ci < chunks.size() && chunks[ci]->offset < off) {
+        ++ci;
+      }
+      cached_chunk* chunk = ci < chunks.size() && chunks[ci]->offset == off ? chunks[ci] : nullptr;
+      range const needed  = intersect(request, range{off, _chunk_size});
+      if (chunk == nullptr ||
+          !chunk->state.try_pin_covering(off, _chunk_size, needed.offset, needed.end())) {
+        return nullptr;
+      }
+      result->_pins.push_back(chunk);
+      result->_pieces.push_back({chunk->data + (needed.offset - chunk->offset),
+                                 raw.dst + (needed.offset - request.offset),
+                                 needed.size});
+    }
+  }
+  return result;
+}
+
 void fs_cache::retire_pins_after_stream(::cuda::stream_ref stream,
                                         cucascade::cuda::device_copy_batch const& copies,
                                         std::shared_ptr<cached_copy_retirement> retirement) noexcept
@@ -1664,8 +1704,15 @@ bool fs_cache::prefetch(cache_handle& handle,
         auto const [seg_lo, seg_hi] = fill_span(fill, c->offset, _chunk_size);
         covered = covered && covers(fill, c->offset, _chunk_size, needed_lo, needed_hi);
         claimed_chunks.push_back(c);
-        prepared.emplace_back(range{seg_lo, seg_hi - seg_lo},
-                              host_buffer{std::vector<cached_chunk*>{c}});
+        // Fills that continue the previous one join its slice, so the reactor reads the run in
+        // segments of its own size rather than one request per chunk.
+        if (!prepared.empty() && prepared.back().rng.end() == seg_lo) {
+          prepared.back().rng.size += seg_hi - seg_lo;
+          std::get<std::vector<cached_chunk*>>(prepared.back().h_buffer.buffer).push_back(c);
+        } else {
+          prepared.emplace_back(range{seg_lo, seg_hi - seg_lo},
+                                host_buffer{std::vector<cached_chunk*>{c}});
+        }
       } else if (covered) {
         // Read state and extent together. A loading chunk belongs to another
         // IO, whose completion this prefetch does not observe. Never promote

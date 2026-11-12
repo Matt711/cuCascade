@@ -40,7 +40,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <emmintrin.h>
 #include <cstring>
 #include <deque>
@@ -136,6 +138,27 @@ size_t write_to_sink(char* ptr, size_t size, size_t nmemb, void* userdata)
     remaining -= n;
   }
   return bytes;
+}
+
+// Measurement (CUCASCADE_REQUEST_LOG=<path>): one line per data GET when it completes: completion
+// time (s, monotonic), bytes, seconds to the first byte, total seconds, HTTP status.
+std::FILE* const request_log = [] {
+  auto const* path = std::getenv("CUCASCADE_REQUEST_LOG");
+  return path != nullptr ? std::fopen(path, "w") : nullptr;
+}();
+std::mutex request_log_mtx;
+
+void log_request(CURL* easy, std::size_t bytes, long http_status) noexcept
+{
+  curl_off_t first = 0, total = 0;
+  curl_easy_getinfo(easy, CURLINFO_STARTTRANSFER_TIME_T, &first);
+  curl_easy_getinfo(easy, CURLINFO_TOTAL_TIME_T, &total);
+  auto const now = std::chrono::duration<double>(
+                     std::chrono::steady_clock::now().time_since_epoch())
+                     .count();
+  std::lock_guard lk(request_log_mtx);
+  std::fprintf(request_log, "%.4f\t%zu\t%.4f\t%.4f\t%ld\n", now, bytes, first / 1e6, total / 1e6,
+               http_status);
 }
 
 /// Discard callback for HEAD requests (no body expected, but be defensive).
@@ -1975,6 +1998,7 @@ void rest_reactor::worker_loop(std::stop_token const& stop_token)
       auto& request     = *slot.req;
       auto& op          = *request.op;
       auto const io_rng = op.io_rng;
+      if (request_log != nullptr) { log_request(slot.easy.get(), io_rng.size, http_status); }
       bool const full_object =
         io_rng.offset == 0 && op.obj != nullptr && io_rng.size == op.obj->size();
       bool const range_status = http_status == 206 || (http_status == 200 && full_object);

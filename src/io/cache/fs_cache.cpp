@@ -34,6 +34,11 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <unordered_map>
 #include <tuple>
 #include <bitset>
 #include <cassert>
@@ -106,6 +111,66 @@ struct cache_generation {
 };
 
 namespace {
+// Debugging (CUCASCADE_CHUNK_CHECK): a checksum of every chunk buffer when its fill is published,
+// checked again when io2 pins it and when it unpins, to catch bytes changing after they landed.
+bool const chunk_check = std::getenv("CUCASCADE_CHUNK_CHECK") != nullptr;
+struct chunk_sum_shard {
+  std::mutex mtx;
+  std::unordered_map<cached_chunk const*, std::uint64_t> sums;
+};
+std::array<chunk_sum_shard, 64> chunk_sums;
+
+chunk_sum_shard& sum_shard(cached_chunk const* c)
+{
+  return chunk_sums[(reinterpret_cast<std::uintptr_t>(c) >> 5) % chunk_sums.size()];
+}
+
+std::uint64_t buffer_sum(std::uint8_t const* p, std::size_t n) noexcept
+{
+  std::uint64_t a = 0, b = 0;
+  for (std::size_t i = 0; i + 8 <= n; i += 8) {
+    std::uint64_t w;
+    std::memcpy(&w, p + i, 8);
+    a += w;
+    b += a;
+  }
+  return a ^ (b * 0x9E3779B97F4A7C15ULL);
+}
+
+void record_chunk_sums(std::span<cached_chunk* const> chunks, std::size_t chunk_size) noexcept
+{
+  for (auto* c : chunks) {
+    auto const sum = buffer_sum(c->data, chunk_size);
+    auto& shard    = sum_shard(c);
+    std::lock_guard lk(shard.mtx);
+    shard.sums[c] = sum;
+  }
+}
+
+void check_chunk_sum(cached_chunk const* c,
+                     std::size_t chunk_size,
+                     std::string const& path,
+                     char const* when) noexcept
+{
+  auto const sum = buffer_sum(c->data, chunk_size);
+  auto& shard    = sum_shard(c);
+  std::uint64_t want = 0;
+  bool known         = false;
+  {
+    std::lock_guard lk(shard.mtx);
+    if (auto it = shard.sums.find(c); it != shard.sums.end()) {
+      want  = it->second;
+      known = true;
+    }
+  }
+  if (!known || sum != want) {
+    auto const [lo, hi] = fill_span(c->state.get_fill(), c->offset, chunk_size);
+    std::fprintf(stderr,
+                 "CUCASCADE_CHUNK_CHECK: %s %s chunk at %zu (fill [%zu, %zu)) data %p %s\n",
+                 when, path.c_str(), c->offset, lo, hi, static_cast<void*>(c->data),
+                 known ? "CHANGED since its fill was published" : "has no recorded fill");
+  }
+}
 using size_terminal = exec::invocable<void(exec::try_t<std::size_t>&&) &&>;
 
 [[nodiscard]] bool resident_covers(cached_chunk const& chunk,
@@ -1256,8 +1321,10 @@ exec::semi_future<std::size_t> fs_cache::device_read_ranges_async(
     lifetime   = std::make_shared<exec::completion_controller::slot>(std::move(admission));
     generation = generation_for(obj, handle);
     completion = std::make_shared<prepared_io_completion>(
-      [lifetime](std::span<cached_chunk* const> completed, bool host_ok) noexcept {
+      [lifetime, chunk_size = _chunk_size](std::span<cached_chunk* const> completed,
+                                           bool host_ok) noexcept {
         std::ignore = lifetime;
+        if (chunk_check && host_ok) { record_chunk_sums(completed, chunk_size); }
         publish_chunk_fill(completed, host_ok);
       });
     for (auto const& raw : requests) {
@@ -1292,6 +1359,7 @@ exec::semi_future<std::size_t> fs_cache::device_read_ranges_async(
         if (chunk != nullptr &&
             chunk->state.try_pin_covering(off, _chunk_size, needed.offset, needed.end())) {
           pinned.push_back(chunk);
+          if (chunk_check) { check_chunk_sum(chunk, _chunk_size, obj.object_path(), "device pin"); }
           cached_copies.add(device_dst, chunk->data + (needed.offset - chunk->offset), needed.size);
           ++hits;
           continue;
@@ -1383,6 +1451,11 @@ exec::semi_future<std::size_t> fs_cache::device_read_ranges_async(
 
 fs_cache::resident_ranges::~resident_ranges()
 {
+  if (chunk_check && _generation) {
+    for (auto* chunk : _pins) {
+      check_chunk_sum(chunk, _generation->chunk_size, _generation->object_path, "unpin");
+    }
+  }
   for (auto* chunk : _pins) {
     chunk->state.release_read();
   }
@@ -1413,6 +1486,7 @@ std::unique_ptr<fs_cache::resident_ranges> fs_cache::pin_resident_ranges(
         return nullptr;
       }
       result->_pins.push_back(chunk);
+      if (chunk_check) { check_chunk_sum(chunk, _chunk_size, obj.object_path(), "pin"); }
       result->_pieces.push_back({chunk->data + (needed.offset - chunk->offset),
                                  raw.dst + (needed.offset - request.offset),
                                  needed.size});
@@ -1737,8 +1811,10 @@ bool fs_cache::prefetch(cache_handle& handle,
     if (!admission) { throw std::runtime_error("fs_cache is shutting down"); }
     auto lifetime   = std::make_shared<exec::completion_controller::slot>(std::move(admission));
     auto completion = std::make_shared<prepared_io_completion>(
-      [lifetime](std::span<cached_chunk* const> completed, bool host_ok) noexcept {
+      [lifetime, chunk_size = _chunk_size](std::span<cached_chunk* const> completed,
+                                           bool host_ok) noexcept {
         std::ignore = lifetime;
+        if (chunk_check && host_ok) { record_chunk_sums(completed, chunk_size); }
         publish_chunk_fill(completed, host_ok);
       });
     done_owner =

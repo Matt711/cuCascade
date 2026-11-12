@@ -34,6 +34,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <tuple>
 #include <bitset>
 #include <cassert>
 #include <chrono>
@@ -1596,6 +1597,22 @@ prepare_result fs_cache::prepare(cache_handle& handle, bool wait_for_eviction)
 {
   if (!handle) { return prepare_result::unavailable; }
   return prepare_request(handle._req, wait_for_eviction);
+}
+
+std::unique_ptr<cache_handle> fs_cache::prefetch_ranges(
+  const io_object& obj,
+  std::span<const byte_range> ranges,
+  exec::invocable<void(prefetch_result) noexcept> on_done)
+{
+  auto handle = initiate_prefetching_request(obj, ranges);
+  if (!handle) {
+    on_done(prefetch_result{.ok = true, .covered = false});
+    return nullptr;
+  }
+  std::ignore = prepare(handle, true);
+  auto owned  = std::make_unique<cache_handle>(std::move(handle));
+  std::ignore = prefetch(*owned, std::move(on_done));
+  return owned;
 }
 
 bool fs_cache::prefetch(cache_handle& handle,

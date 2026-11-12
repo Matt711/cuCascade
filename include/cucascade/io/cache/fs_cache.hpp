@@ -401,6 +401,18 @@ class fs_cache {
   /// another reader).
   bool prefetch(cache_handle& handle, exec::invocable<void(prefetch_result) noexcept> on_done);
 
+  /// Load @p ranges of @p obj into the cache ahead of a read, for a caller that schedules its own
+  /// read-ahead: a new prefetching request, its buffers attached (waiting for eviction if the pool
+  /// is full), and its IO issued.  @p on_done fires exactly once, as for @ref prefetch, and inline
+  /// with @c {true, false} when the cache had no new work (every range already requested).
+  /// Returns the request, which keeps its chunks from being reclaimed while held, or null.
+  /// Reads of the ranges go through the cache as usual (a chunk that is not resident is read from
+  /// the backend), so the outcome only matters for speed.
+  [[nodiscard]] std::unique_ptr<cache_handle> prefetch_ranges(
+    const io_object& obj,
+    std::span<const byte_range> ranges,
+    exec::invocable<void(prefetch_result) noexcept> on_done);
+
   /// Test-only hook run inside @ref prefetch after the producer is published
   /// as loading and before any chunk is claimed, with no cache lock held.
   /// Configure only while no prefetch can run.

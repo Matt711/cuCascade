@@ -16,5 +16,5 @@
 # =============================================================================
 
 target_sources(
-  cucascade_objects PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/device_copy_batch.cpp
+  cucascade_objects PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/device_copy_batch.cu
                             ${CMAKE_CURRENT_SOURCE_DIR}/event.cpp)

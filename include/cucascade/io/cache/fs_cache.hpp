@@ -407,11 +407,13 @@ class fs_cache {
   /// with @c {true, false} when the cache had no new work (every range already requested).
   /// Returns the request, which keeps its chunks from being reclaimed while held, or null.
   /// Reads of the ranges go through the cache as usual (a chunk that is not resident is read from
-  /// the backend), so the outcome only matters for speed.
+  /// the backend), so the outcome only matters for speed. Its chunks get @p eviction_priority (see
+  /// @ref initiate_prefetching_request).
   [[nodiscard]] std::unique_ptr<cache_handle> prefetch_ranges(
     const io_object& obj,
     std::span<const byte_range> ranges,
-    exec::invocable<void(prefetch_result) noexcept> on_done);
+    exec::invocable<void(prefetch_result) noexcept> on_done,
+    std::uint8_t eviction_priority = 0);
 
   /// Cache-resident bytes of some ranges, pinned against eviction until destroyed: for a caller
   /// that copies them itself and knows when the copies are done.

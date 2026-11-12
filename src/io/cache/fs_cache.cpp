@@ -1716,9 +1716,10 @@ prepare_result fs_cache::prepare(cache_handle& handle, bool wait_for_eviction)
 std::unique_ptr<cache_handle> fs_cache::prefetch_ranges(
   const io_object& obj,
   std::span<const byte_range> ranges,
-  exec::invocable<void(prefetch_result) noexcept> on_done)
+  exec::invocable<void(prefetch_result) noexcept> on_done,
+  std::uint8_t eviction_priority)
 {
-  auto handle = initiate_prefetching_request(obj, ranges);
+  auto handle = initiate_prefetching_request(obj, ranges, std::nullopt, eviction_priority);
   if (!handle) {
     on_done(prefetch_result{.ok = true, .covered = false});
     return nullptr;

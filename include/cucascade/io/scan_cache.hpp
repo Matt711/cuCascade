@@ -23,6 +23,7 @@
 #include <cucascade/io/datasource_factory.hpp>
 #include <cucascade/io/io_context.hpp>
 #include <cucascade/io/object_cache.hpp>
+#include <cucascade/io/object_store_config.hpp>
 #include <cucascade/memory/memory_reservation_manager.hpp>
 
 #include <cstddef>
@@ -57,10 +58,11 @@ struct scan_cache_config {
   std::size_t min_advise_bytes{default_cache_chunk_bytes};
 
   /// REST reactor threads.
-  std::size_t reactors{16};
+  std::size_t reactors{4};
 
-  /// Connections each REST reactor drives.
-  std::size_t connections{128};
+  /// Connections each REST reactor drives. Reading from S3, 4 x 256 was faster than 16 x 128,
+  /// which spent time on connect and stall retries.
+  std::size_t connections{256};
 
   /// A GET that moves under 64 KiB/s for this many seconds is aborted and retried, so a request
   /// that gets no bytes does not hold a query up for the 30 s default.
@@ -75,32 +77,36 @@ struct scan_cache_config {
   /// per GiB on a node, and the driver path cannot use more than one thread.
   std::optional<int> numa_node;
 
-  /// Object store endpoint, region and credentials.
-  std::string endpoint;
-  std::string region;
-  std::string access_key;
-  std::string secret_key;
-  std::string session_token;
+  /// Object store endpoint, region, credentials, TLS and transport. Requests are signed in the
+  /// @c Authorization header unless this says otherwise.
+  object_store_config object_store = [] {
+    object_store_config store;
+    store.s3_signing_mode = object_store_config::signing_mode::header;
+    return store;
+  }();
 };
 
 /**
  * @brief A host-memory cache for the parquet reads of object-store scans, as a single object.
  *
- * Assembles what a pylibcudf-based reader needs to use the prefetching cache: the pinned host
- * cache, the REST io context, a @ref column_admission policy that decides which columns to keep,
- * and an @ref object_cache that makes reopening a file free. @ref open returns a datasource that
- * a reader reads through; reads of it are advised to the cache under the admission policy.
+ * Assembles what a reader needs to use the prefetching cache: the pinned host cache, the REST io
+ * context, a @ref column_admission policy that decides which columns to keep, and an
+ * @ref object_cache that makes reopening a file free. @ref open returns an @ref advising_reader
+ * that a reader reads through; its reads are advised to the cache under the admission policy.
  *
  * The cache is pinned when the object is created, which takes about 0.2 s per GiB when it is placed
  * on a NUMA node (the default), so that the first query does not pay for it.
  *
- * Every datasource from @ref open must be destroyed before the cache is.
+ * Every reader from @ref open shares ownership of the cache, so a reader may outlive this object:
+ * the cache is released when the last of them is destroyed.
  *
  * Thread-safe.
  */
 class scan_cache {
  public:
-  /// @throws std::invalid_argument If @c config.cache_bytes is 0.
+  /// @throws std::invalid_argument If @c config.cache_bytes is 0, @c config.block_bytes is 0 or
+  /// larger than one 128 MiB pool, or a fraction is not in [0, 1].
+  /// @throws std::runtime_error If the REST io context or the prefetching cache cannot be created.
   explicit scan_cache(scan_cache_config const& config);
   ~scan_cache();
 
@@ -112,9 +118,9 @@ class scan_cache {
   /**
    * @brief Open an object-store object for reading.
    *
-   * The first open of a path resolves its size, version tag and footer with one request; later
-   * opens of it need none. The reader advises its reads to the cache under the admission policy
-   * (see @ref advising_reader).
+   * The first open of a path resolves its size, version tag and footer with one request, shared by
+   * concurrent first opens; later opens of it need none. The reader advises its reads to the cache
+   * under the admission policy (see @ref advising_reader).
    */
   [[nodiscard]] std::unique_ptr<advising_reader> open(std::string const& path);
 
@@ -144,11 +150,10 @@ class scan_cache {
   std::size_t clear();
 
  private:
-  std::unique_ptr<cucascade::memory::memory_reservation_manager> _memory;
-  std::unique_ptr<io_context_registry> _registry;
-  std::shared_ptr<ioctx> _context;
-  std::shared_ptr<column_admission> _admission;
-  std::shared_ptr<object_cache> _objects;
+  /// What the cache is made of, owned jointly by this object and every reader it opened.
+  struct state;
+
+  std::shared_ptr<state> _state;
   std::size_t _min_advise_bytes;
 };
 

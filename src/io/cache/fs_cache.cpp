@@ -35,16 +35,14 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <unordered_map>
-#include <tuple>
 #include <bitset>
 #include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <format>
 #include <functional>
@@ -58,7 +56,9 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -152,8 +152,8 @@ void check_chunk_sum(cached_chunk const* c,
                      std::string const& path,
                      char const* when) noexcept
 {
-  auto const sum = buffer_sum(c->data, chunk_size);
-  auto& shard    = sum_shard(c);
+  auto const sum     = buffer_sum(c->data, chunk_size);
+  auto& shard        = sum_shard(c);
   std::uint64_t want = 0;
   bool known         = false;
   {
@@ -167,7 +167,12 @@ void check_chunk_sum(cached_chunk const* c,
     auto const [lo, hi] = fill_span(c->state.get_fill(), c->offset, chunk_size);
     std::fprintf(stderr,
                  "CUCASCADE_CHUNK_CHECK: %s %s chunk at %zu (fill [%zu, %zu)) data %p %s\n",
-                 when, path.c_str(), c->offset, lo, hi, static_cast<void*>(c->data),
+                 when,
+                 path.c_str(),
+                 c->offset,
+                 lo,
+                 hi,
+                 static_cast<void*>(c->data),
                  known ? "CHANGED since its fill was published" : "has no recorded fill");
   }
 }
